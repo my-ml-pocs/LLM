@@ -21,7 +21,7 @@ pipeline {
 
         stage('Static Code Analysis') {
             steps {
-                sh 'sonnar-scanner'
+                sh 'sonar-scanner'
             }
         }
 
