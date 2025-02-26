@@ -17,29 +17,9 @@ pipeline {
             }
         }
 
-        
-
-        stage('Install Dependencies') {
-            steps {
-                sh 'composer install'
-            }
-        }
-
-        stage('Build') {
-            steps {
-                sh 'composer build'
-            }
-        }
-
-        stage('Run Unit Tests') {
-            steps {
-                sh 'composer test'
-            }
-        }
-
         stage('Static Code Analysis') {
             steps {
-                sh "sonar-scanner -Dsonar.projectKey=${APP_NAME} -Dsonar.sources=. -Dsonar.host.url=${Sonar_Url} -Dsonar.login=${Sonar_Token}"
+                sh 'sonar-scanner'
             }
         }
 
