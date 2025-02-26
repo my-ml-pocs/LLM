@@ -79,15 +79,17 @@ pipeline {
     }
 
     post {
-        failure {
-            script {
-                // Rollback mechanism
-                sh '''
-                if [ -f deployment.yaml ]; then
-                    kubectl rollout undo deployment/${APP_NAME}
-                fi
-                '''
-            }
+    failure {
+        script {
+            sh '''
+            if kubectl get deployment ${APP_NAME}; then
+                kubectl rollout undo deployment/${APP_NAME}
+            else
+                echo "Deployment ${APP_NAME} not found, skipping rollback"
+            fi
+            '''
         }
     }
+}
+
 }
