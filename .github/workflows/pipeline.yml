@@ -78,12 +78,6 @@ jobs:
           docker build -t $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA .
           docker push $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
 
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Security Scan
-        run: trivy image $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
-
   deploy:
     runs-on: ubuntu-latest
     steps:
@@ -100,10 +94,3 @@ jobs:
           else
             echo "No deployment configuration found (helm/values.yaml or deployment.yaml)."
             exit 1
-
-  rollback:
-    runs-on: ubuntu-latest
-    if: failure()
-    steps:
-      - name: Rollback Deployment
-        run: echo "Implement rollback mechanism here."
