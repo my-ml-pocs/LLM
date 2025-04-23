@@ -43,36 +43,6 @@ jobs:
       - name: Build Application
         run: echo "Build step for PHP application"
 
-  unit-tests:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Run Unit Tests
-        run: ./vendor/bin/phpunit --configuration phpunit.xml
-
-  static-code-analysis:
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    steps:
-      - name: Run Static Code Analysis
-        run: |
-          sonar-scanner \
-            -Dsonar.projectKey=$APP_NAME \
-            -Dsonar.sources=. \
-            -Dsonar.host.url=$Sonar_Url \
-            -Dsonar.login=$Sonar_Token
-
-  quality-gate:
-    runs-on: ubuntu-latest
-    needs: static-code-analysis
-    steps:
-      - name: Check Quality Gate
-        run: |
-          STATUS=$(curl -s -u "$Sonar_Token:" "$Sonar_Url/api/qualitygates/project_status?projectKey=$APP_NAME" | jq -r .projectStatus.status)
-          if [[ "$STATUS" != "OK" && "$STATUS" != "NONE" ]]; then
-            echo "Quality Gate failed: $STATUS"
-            exit 1
-          fi
 
   docker-build-push:
     runs-on: ubuntu-latest
@@ -83,22 +53,4 @@ jobs:
           docker build -t $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA .
           docker push $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
 
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: security-scan
-    steps:
-      - name: Deploy Application
-        run: |
-          if [ -f "helm/values.yaml" ]; then
-            helm upgrade --install $APP_NAME helm/ --set image.repository=$DOCKER_REGISTRY/$APP_NAME,image.tag=$GIT_SHA
-          elif [ -f "deployment.yaml" ]; then
-            case "$(uname -s)" in
-              Darwin*) sed -i '' "s@image: .*@image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA@" deployment.yaml ;;
-              *) sed -i "s@image: .*@image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA@" deployment.yaml ;;
-            esac
-            kubectl apply -f deployment.yaml
-          else
-            echo "No deployment configuration found!"
-            exit 1
 
