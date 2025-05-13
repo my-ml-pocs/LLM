@@ -1,0 +1,117 @@
+<project name="CI Pipeline">
+    <description>TeamCity build configuration for CI Pipeline</description>
+
+    <property name="DOCKER_REGISTRY" value="localhost:5000"/>
+    <property name="APP_NAME" value="myapp"/>
+    <property name="Sonar_Url" value="https://localhost"/>
+    <property name="Sonar_Token" value="${env.SONAR_TOKEN}"/>
+    <property name="security_scan_tool" value="trivy"/>
+    <property name="GIT_SHA" value="${env.BUILD_VCS_NUMBER}"/>
+
+    <target name="Checkout SCM">
+        <exec executable="git">
+            <arg value="checkout"/>
+            <arg value="."/>
+        </exec>
+    </target>
+
+    <target name="Setup PHP with Xdebug">
+        <exec executable="sudo">
+            <arg value="add-apt-repository"/>
+            <arg value="ppa:ondrej/php"/>
+            <arg value="-y"/>
+        </exec>
+        <exec executable="sudo">
+            <arg value="apt-get"/>
+            <arg value="update"/>
+        </exec>
+        <exec executable="sudo">
+            <arg value="apt-get"/>
+            <arg value="install"/>
+            <arg value="-y"/>
+            <arg value="php8.1 php8.1-cli php8.1-xml php8.1-xdebug"/>
+        </exec>
+        <exec executable="php">
+            <arg value="-v"/>
+        </exec>
+    </target>
+
+    <target name="Install dependencies with Composer">
+        <exec executable="composer">
+            <arg value="update"/>
+            <arg value="--no-ansi"/>
+            <arg value="--no-interaction"/>
+            <arg value="--no-progress"/>
+        </exec>
+    </target>
+
+    <target name="Run tests with PHPUnit">
+        <exec executable="vendor/bin/phpunit">
+            <arg value="--coverage-clover=coverage.xml"/>
+        </exec>
+    </target>
+
+    <target name="Static Code Analysis">
+        <exec executable="sonar-scanner">
+            <env key="SONAR_TOKEN" value="${Sonar_Token}"/>
+        </exec>
+    </target>
+
+    <target name="Quality Gate">
+        <exec executable="sonar-scanner">
+            <arg value="-Dsonar.projectKey=myapp"/>
+            <arg value="-Dsonar.organization=myorg"/>
+            <arg value="-Dsonar.host.url=${Sonar_Url}"/>
+            <arg value="-Dsonar.login=${Sonar_Token}"/>
+        </exec>
+        <condition property="quality_gate_status" value="OK">
+            <equals arg1="${sonar-quality-gate-status}" arg2="OK"/>
+        </condition>
+        <fail unless="quality_gate_status">
+            <echo message="Quality Gate failed"/>
+        </fail>
+    </target>
+
+    <target name="Docker Build and Push">
+        <exec executable="docker">
+            <arg value="build"/>
+            <arg value="-t"/>
+            <arg value="${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA}"/>
+            <arg value="."/>
+        </exec>
+        <exec executable="docker">
+            <arg value="push"/>
+            <arg value="${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA}"/>
+        </exec>
+    </target>
+
+    <target name="Security Scan">
+        <exec executable="${security_scan_tool}">
+            <arg value="image"/>
+            <arg value="${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA}"/>
+        </exec>
+    </target>
+
+    <target name="Deploy">
+        <exec executable="helm" if="file.exists('helm/values.yaml')">
+            <arg value="upgrade"/>
+            <arg value="--install"/>
+            <arg value="${APP_NAME}"/>
+            <arg value="./helm"/>
+            <arg value="--set"/>
+            <arg value="image.repository=${DOCKER_REGISTRY}/${APP_NAME}"/>
+            <arg value="--set"/>
+            <arg value="image.tag=${GIT_SHA}"/>
+        </exec>
+        <exec executable="kubectl" unless="file.exists('helm/values.yaml')">
+            <arg value="apply"/>
+            <arg value="-f"/>
+            <arg value="deployment.yaml"/>
+        </exec>
+        <fail unless="file.exists('helm/values.yaml') || file.exists('deployment.yaml')">
+            <echo message="No deployment configuration found (helm/values.yaml or deployment.yaml)"/>
+        </fail>
+    </target>
+
+    <target name="Rollback" if="failure()">
+        <exec executable="kub
