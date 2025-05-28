@@ -1,0 +1,57 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.1'
+
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress --no-suggest
+
+    - name: Run tests
+      run: vendor/bin/phpunit --configuration phpunit.xml
+
+    - name: Lint Dockerfile
+      run: docker run --rm -i hadolint/hadolint < Dockerfile
+
+    - name: Build Docker image
+      run: docker build -t myapp:latest .
+
+    - name: Push Docker image
+      run: |
+        echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+        docker tag myapp:latest ${{ secrets.DOCKER_REGISTRY }}/myapp:latest
+        docker push ${{ secrets.DOCKER_REGISTRY }}/myapp:latest
+
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -f deployment.yaml
+
+    - name: Run SonarQube analysis
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        sonar-scanner \
+          -Dsonar.projectKey=myapp \
+          -Dsonar.sources=. \
+          -Dsonar.host.url=${{ secrets.SONAR_URL }} \
+          -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    - name: Run security scan
+      run: docker run --rm -v $(pwd):/app aquasec/trivy:latest --exit-code 1 --severity HIGH,CRITICAL /app
