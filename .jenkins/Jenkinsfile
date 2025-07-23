@@ -1,0 +1,35 @@
+pipeline {
+    agent any
+
+    environment {
+        JAVA_HOME = '/path/to/java'
+    }
+
+    stages {
+        stage('Compile') {
+            steps {
+                script {
+                    sh 'mvn clean compile'
+                }
+            }
+        }
+        stage('Test') {
+            steps {
+                script {
+                    sh 'mvn test'
+                }
+            }
+        }
+        stage('Package') {
+            steps {
+                script {
+                    sh 'mvn package'
+                }
+            }
+        }
+    }
+
+    triggers {
+        scm('H/5 * * * *')
+    }
+}
