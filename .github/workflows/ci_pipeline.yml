@@ -1,0 +1,108 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  DOCKER_REGISTRY: localhost:5000
+  APP_NAME: myapp
+  Sonar_Url: https://localhost
+  Sonar_Token: ${{ secrets.SONAR_TOKEN }}
+  security_scan_tool: trivy
+  GIT_SHA: ${{ github.sha }}
+
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SCM
+        uses: actions/checkout@v2
+
+  setup-php:
+    runs-on: ubuntu-latest
+    needs: checkout
+    steps:
+      - name: Setup PHP with Xdebug
+        run: |
+          sudo add-apt-repository ppa:ondrej/php -y
+          sudo apt-get update
+          sudo apt-get install -y php8.1 php8.1-cli php8.1-xml php8.1-xdebug
+          php -v
+
+  install-dependencies:
+    runs-on: ubuntu-latest
+    needs: setup-php
+    steps:
+      - name: Install dependencies with Composer
+        run: composer update --no-ansi --no-interaction --no-progress
+
+  run-tests:
+    runs-on: ubuntu-latest
+    needs: install-dependencies
+    steps:
+      - name: Run tests with PHPUnit
+        run: vendor/bin/phpunit --coverage-clover=coverage.xml
+
+  static-code-analysis:
+    runs-on: ubuntu-latest
+    needs: run-tests
+    steps:
+      - name: Static Code Analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: sonar-scanner
+
+  quality-gate:
+    runs-on: ubuntu-latest
+    needs: static-code-analysis
+    steps:
+      - name: Quality Gate
+        run: |
+          sonar-scanner -Dsonar.projectKey=myapp -Dsonar.organization=myorg -Dsonar.host.url=${{ env.Sonar_Url }} -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+          if [ "${{ steps.sonar-quality-gate.outputs.sonar-quality-gate-status }}" != "OK" ]; then
+            echo "Quality Gate failed"
+            exit 1
+          fi
+
+  docker-build-push:
+    runs-on: ubuntu-latest
+    needs: quality-gate
+    steps:
+      - name: Docker Build and Push
+        run: |
+          docker build -t ${{ env.DOCKER_REGISTRY }}/${{ env.APP_NAME }}:${{ env.GIT_SHA }} .
+          docker push ${{ env.DOCKER_REGISTRY }}/${{ env.APP_NAME }}:${{ env.GIT_SHA }}
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    steps:
+      - name: Security Scan
+        run: ${{ env.security_scan_tool }} image ${{ env.DOCKER_REGISTRY }}/${{ env.APP_NAME }}:${{ env.GIT_SHA }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - name: Deploy
+        run: |
+          if [ -f helm/values.yaml ]; then
+            helm upgrade --install ${{ env.APP_NAME }} ./helm --set image.repository=${{ env.DOCKER_REGISTRY }}/${{ env.APP_NAME }} --set image.tag=${{ env.GIT_SHA }}
+          elif [ -f deployment.yaml ]; then
+            kubectl apply -f deployment.yaml
+          else
+            echo "No deployment configuration found (helm/values.yaml or deployment.yaml)"
+            exit 1
+
+  rollback:
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: deploy
+    steps:
+      - name: Rollback
+        run: kubectl rollout undo deployment/${{ env.APP_NAME }}
