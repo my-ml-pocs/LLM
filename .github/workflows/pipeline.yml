@@ -1,0 +1,80 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  DOCKER_REGISTRY: localhost:5000
+  APP_NAME: myapp
+  Sonar_Url: https://localhost
+  Sonar_Token: sonarqube
+  security_scan_tool: trivy
+  GIT_SHA: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout SCM
+      uses: actions/checkout@v3
+
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.0'
+
+    - name: Install Dependencies
+      run: composer install
+
+    - name: Run Unit Tests
+      run: vendor/bin/phpunit --configuration phpunit.xml
+
+    - name: Static Code Analysis
+      run: |
+        sonar-scanner \
+          -Dsonar.projectKey=$APP_NAME \
+          -Dsonar.sources=. \
+          -Dsonar.host.url=$Sonar_Url \
+          -Dsonar.login=$Sonar_Token
+
+    - name: Quality Gate Check
+      id: quality-gate
+      run: |
+        status=$(curl -s -u $Sonar_Token: "$Sonar_Url/api/qualitygates/project_status?projectKey=$APP_NAME" | jq -r '.projectStatus.status')
+        if [[ "$status" != "OK" && "$status" != "NONE" ]]; then
+          echo "Quality Gate failed: $status"
+          exit 1
+        fi
+
+    - name: Docker Build and Push
+      run: |
+        docker build -t $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA .
+        docker push $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
+
+    - name: Security Scan
+      run: trivy image $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
+
+    - name: Deploy
+      run: |
+        if [ -f "helm/values.yaml" ]; then
+          helm upgrade --install $APP_NAME helm/ --set image.repository=$DOCKER_REGISTRY/$APP_NAME --set image.tag=$GIT_SHA
+        elif [ -f "deployment.yaml" ]; then
+          case "$(uname -s)" in
+            Darwin*) sed -i '' "s|image: .*/$APP_NAME:.*|image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA|" deployment.yaml ;;
+            *) sed -i "s|image: .*/$APP_NAME:.*|image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA|" deployment.yaml ;;
+          esac
+          kubectl apply -f deployment.yaml
+        else
+          echo "Error: No deployment configuration found."
+          exit 1
+        fi
+
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        echo "Rolling back to previous stable version..."
+        # Implement rollback logic here
