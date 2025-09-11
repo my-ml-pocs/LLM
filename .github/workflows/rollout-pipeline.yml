@@ -1,0 +1,110 @@
+name: Rollout Pipeline
+
+on:
+  push:
+    branches:
+      - roll-out-*
+
+env:
+  DOCKER_REGISTRY: localhost:5000
+  APP_NAME: myapp
+  Sonar_Url: https://localhost
+  Sonar_Token: sonarqube
+  security_scan_tool: trivy
+  GIT_SHA: ${{ github.sha }}
+
+jobs:
+  checkout:
+    name: Checkout SCM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+  install-dependencies:
+    name: Install Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PHP and Composer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli unzip
+          curl -sS https://getcomposer.org/installer | php
+          sudo mv composer.phar /usr/local/bin/composer
+      - name: Install Dependencies
+        run: composer install
+
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Docker Image
+        run: |
+          docker build -t $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA .
+
+  unit-tests:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run PHPUnit Tests
+        run: vendor/bin/phpunit
+
+  static-code-analysis:
+    name: Static Code Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run SonarQube Analysis
+        run: |
+          sonar-scanner -Dsonar.projectKey=$APP_NAME -Dsonar.sources=. -Dsonar.host.url=$Sonar_Url -Dsonar.login=$Sonar_Token
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Quality Gate
+        run: |
+          STATUS=$(curl -s -u $Sonar_Token: "$Sonar_Url/api/qualitygates/project_status?projectKey=$APP_NAME" | jq -r .projectStatus.status)
+          if [[ "$STATUS" != "OK" && "$STATUS" != "NONE" ]]; then
+            echo "Quality Gate failed with status: $STATUS" && exit 1
+          fi
+
+  docker-push:
+    name: Docker Build and Push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push Docker Image
+        run: |
+          docker push $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Trivy Security Scan
+        run: trivy image $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA
+
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy Using Kubernetes
+        run: |
+          if [ -f "helm/values.yaml" ]; then
+            helm upgrade --install $APP_NAME ./helm --set image.repository=$DOCKER_REGISTRY/$APP_NAME --set image.tag=$GIT_SHA
+          elif [ -f "deployment.yaml" ]; then
+            case "$(uname -s)" in
+              Darwin*) sed -i '' "s|image: .*$|image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA|" deployment.yaml ;;
+              *) sed -i "s|image: .*$|image: $DOCKER_REGISTRY/$APP_NAME:$GIT_SHA|" deployment.yaml ;;
+            esac
+            kubectl apply -f deployment.yaml
+          else
+            echo "No deployment configuration found!" && exit 1
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Rollback Deployment
+        run: |
+          kubectl rollout undo deployment/$APP_NAME
