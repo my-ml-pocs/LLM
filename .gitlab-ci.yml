@@ -1,0 +1,140 @@
+stages:
+  - checkout
+  - setup
+  - dependencies
+  - test
+  - analysis
+  - quality_gate
+  - build
+  - scan
+  - deploy
+  - rollback
+
+variables:
+  DOCKER_REGISTRY: "localhost:5000"
+  APP_NAME: "myapp"
+  SONAR_HOST_URL: "https://localhost"
+  SECURITY_SCAN_TOOL: "trivy"
+  GIT_SHA: "$CI_COMMIT_SHA"
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+checkout_scm:
+  stage: checkout
+  image: alpine/git:latest
+  script:
+    - git checkout .
+
+setup_php:
+  stage: setup
+  image: ubuntu:22.04
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common curl ca-certificates lsb-release apt-transport-https
+    - add-apt-repository ppa:ondrej/php -y
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y php8.1 php8.1-cli php8.1-xml php8.1-xdebug
+    - php -v
+
+install_dependencies:
+  stage: dependencies
+  image: composer:2
+  script:
+    - composer update --no-ansi --no-interaction --no-progress
+  cache:
+    key: composer-$CI_COMMIT_REF_SLUG
+    paths:
+      - vendor/
+
+run_tests:
+  stage: test
+  image: php:8.1-cli
+  script:
+    - apt-get update && apt-get install -y git unzip libzip-dev
+    - docker-php-ext-install zip
+    - composer install --no-interaction --no-progress
+    - vendor/bin/phpunit --coverage-clover=coverage.xml
+  artifacts:
+    when: always
+    paths:
+      - coverage.xml
+      - vendor/
+    expire_in: 1 week
+
+static_code_analysis:
+  stage: analysis
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - sonar-scanner
+  variables:
+    SONAR_TOKEN: "$SONAR_TOKEN"
+  allow_failure: false
+
+quality_gate:
+  stage: quality_gate
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - |
+      sonar-scanner \
+        -Dsonar.projectKey=myapp \
+        -Dsonar.organization=myorg \
+        -Dsonar.host.url=${SONAR_HOST_URL} \
+        -Dsonar.login=${SONAR_TOKEN}
+    - |
+      if [ "${SONAR_QUALITY_GATE_STATUS:-}" != "OK" ]; then
+        echo "Quality Gate failed"
+        exit 1
+      fi
+  dependencies: []
+  needs:
+    - static_code_analysis
+
+docker_build_push:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker build -t ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA} .
+    - docker push ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA}
+  needs:
+    - quality_gate
+
+security_scan:
+  stage: scan
+  image: aquasec/trivy:latest
+  script:
+    - ${SECURITY_SCAN_TOOL} image ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_SHA}
+  needs:
+    - docker_build_push
+
+deploy:
+  stage: deploy
+  image: alpine/helm:3.15.4
+  script:
+    - |
+      if [ -f helm/values.yaml ]; then
+        helm upgrade --install ${APP_NAME} ./helm --set image.repository=${DOCKER_REGISTRY}/${APP_NAME} --set image.tag=${GIT_SHA}
+      elif [ -f deployment.yaml ]; then
+        apk add --no-cache kubectl
+        kubectl apply -f deployment.yaml
+      else
+        echo "No deployment configuration found (helm/values.yaml or deployment.yaml)"
+        exit 1
+      fi
+  needs:
+    - security_scan
+  when: on_success
+
+rollback:
+  stage: rollback
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl rollout undo deployment/${APP_NAME}
+  when: on_failure
